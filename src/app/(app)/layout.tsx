@@ -1,13 +1,14 @@
-import { getDefaultUser } from "@/lib/auth";
 import { AppShell } from "@/components/app-shell";
+import { seedDemoData, getSettings } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
-  // Uso pessoal: sem login — o app sempre abre direto no painel
-  const user = await getDefaultUser();
+  // Uso pessoal: seed automatico na primeira execução
+  seedDemoData();
+  const settings = getSettings();
 
   return (
-    <AppShell user={{ name: user.name, email: user.email }}>{children}</AppShell>
+    <AppShell user={{ name: settings.name, email: settings.email }}>{children}</AppShell>
   );
 }
