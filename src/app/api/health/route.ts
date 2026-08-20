@@ -1,5 +1,8 @@
+import { NextResponse } from "next/server";
+
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  return Response.json({ ok: true });
+// App 100% client-side: healthcheck simples, sem banco de dados.
+export function GET() {
+  return NextResponse.json({ ok: true });
 }

@@ -15,13 +15,11 @@ import {
   TriangleAlert,
   Zap,
 } from "lucide-react";
-import type { UserSettings } from "@/lib/storage";
-import type { DayResult, EntryType } from "@/lib/time";
+import type { Compensation, DayResult, WorkSettings } from "@/lib/types";
+import type { EntryType, TimeEntryLike } from "@/lib/time";
 import { formatDateShortBR, formatMinutes, nextWorkday, nowTimeString, weekdayLong } from "@/lib/time";
 import { Badge, Button, Input, Select } from "@/components/ui";
 import { CompensationForm, type CompFormData } from "@/components/compensation-form";
-import { useToast } from "@/components/toast";
-import { updateEntry as storageUpdate, deleteEntry as storageDelete, addEntry as storageAdd } from "@/lib/storage";
 
 export function statusBadge(d: DayResult) {
   if (d.status === "excess") return <Badge tone="rose">Acima do limite</Badge>;
@@ -33,15 +31,28 @@ export function statusBadge(d: DayResult) {
 
 interface Props {
   result: DayResult;
-  settings: UserSettings;
-  onDone?: () => void;
+  settings: WorkSettings;
+  compsForDate: Compensation[]; // compensações com destino neste dia
+  onAddEntry: (p: { date: string; time: string; type: EntryType; note: string | null }) => Promise<void>;
+  onUpdateEntry: (id: number, patch: { time?: string; type?: EntryType; note?: string | null }) => Promise<void>;
+  onDeleteEntry: (id: number) => Promise<void>;
+  onCompleteComp: (id: number) => Promise<void>;
+  onCreateComp: (data: CompFormData) => Promise<void>;
 }
 
-export function DayCard({ result, settings, onDone }: Props) {
-  const toast = useToast();
+export function DayCard({
+  result,
+  settings,
+  compsForDate,
+  onAddEntry,
+  onUpdateEntry,
+  onDeleteEntry,
+  onCompleteComp,
+  onCreateComp,
+}: Props) {
   const [expanded, setExpanded] = useState(result.open || result.status === "excess");
   const [showAdd, setShowAdd] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [form, setForm] = useState<{ type: EntryType; time: string; note: string }>({
     type: "entrada",
     time: nowTimeString(),
@@ -56,63 +67,51 @@ export function DayCard({ result, settings, onDone }: Props) {
   const [compOpen, setCompOpen] = useState(false);
 
   const d = result;
-  const pendingComp = d.date ? undefined : undefined; // placeholder
+  const pendingComp = compsForDate.find((c) => c.status === "pendente");
 
-  const add = (type?: EntryType, time?: string) => {
+  const add = async (type?: EntryType, time?: string) => {
     if (busy) return;
     setBusy(true);
     try {
-      storageAdd({ date: d.date, time: time ?? form.time, type: type ?? form.type, note: form.note || null });
+      await onAddEntry({ date: d.date, time: time ?? form.time, type: type ?? form.type, note: form.note || null });
       setForm((f) => ({ ...f, note: "" }));
       setShowAdd(false);
-      toast.show("Registro adicionado!");
-      onDone?.();
     } finally {
       setBusy(false);
     }
   };
 
-  const startEdit = (e: { id: string | number; type: EntryType; time: string; note: string | null }) => {
-    setEditingId(String(e.id));
+  const startEdit = (e: TimeEntryLike) => {
+    setEditingId(e.id);
     setEditForm({ type: e.type, time: e.time, note: e.note ?? "" });
   };
 
-  const saveEdit = () => {
-    if (busy || !editingId) return;
+  const saveEdit = async (id: number) => {
+    if (busy) return;
     setBusy(true);
     try {
-      storageUpdate(editingId, editForm);
+      await onUpdateEntry(id, editForm);
       setEditingId(null);
-      toast.show("Registro atualizado!");
-      onDone?.();
     } finally {
       setBusy(false);
     }
   };
 
-  const remove = (id: string) => {
+  const remove = async (id: number) => {
     if (!window.confirm("Remover este registro?")) return;
-    storageDelete(id);
-    toast.show("Registro removido.");
-    onDone?.();
+    await onDeleteEntry(id);
   };
 
-  const createComp = (data: CompFormData) => {
-    try {
-      const { addCompensation } = require("@/lib/storage");
-      addCompensation({ sourceDate: data.sourceDate, targetDate: data.targetDate, minutes: data.minutes, note: data.note || null });
-      toast.show("Compensação criada!");
-      setCompOpen(false);
-      onDone?.();
-    } catch {
-      toast.show("Erro ao criar compensação.", "error");
-    }
+  const finishComp = async (id: number) => {
+    if (!window.confirm("Marcar esta compensação como concluída?")) return;
+    await onCompleteComp(id);
   };
 
   const balanceTone = d.balanceMinutes > 0 ? "text-emerald-600" : d.balanceMinutes < 0 ? "text-rose-600" : "text-slate-500";
 
   return (
     <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      {/* Cabeçalho */}
       <button
         onClick={() => setExpanded((v) => !v)}
         className="flex w-full items-center gap-3 px-5 py-4 text-left cursor-pointer hover:bg-slate-50/70 transition-colors"
@@ -144,13 +143,20 @@ export function DayCard({ result, settings, onDone }: Props) {
 
       {expanded && (
         <div className="border-t border-slate-100 px-5 py-4">
+          {/* Métricas */}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <MiniStat label="Trabalhado" value={formatMinutes(d.workedMinutes)} tone="text-slate-900" />
             <MiniStat label="Base diária" value={formatMinutes(d.expectedMinutes)} tone="text-slate-500" />
             <MiniStat label="Saldo" value={`${d.balanceMinutes >= 0 ? "+" : ""}${formatMinutes(d.balanceMinutes)}`} tone={balanceTone} />
-            <MiniStat label="No ponto*" value={formatMinutes(d.registrableMinutes)} tone="text-indigo-600" sub={d.excessMinutes > 0 ? "limitado a 10h" : undefined} />
+            <MiniStat
+              label="No ponto*"
+              value={formatMinutes(d.registrableMinutes)}
+              tone="text-indigo-600"
+              sub={d.excessMinutes > 0 ? "limitado a 10h" : undefined}
+            />
           </div>
 
+          {/* Aviso de excedente */}
           {d.excessMinutes > 0 && (
             <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5">
               <TriangleAlert size={16} className="text-rose-500 shrink-0" />
@@ -166,6 +172,22 @@ export function DayCard({ result, settings, onDone }: Props) {
             </div>
           )}
 
+          {/* Compensação programada para este dia */}
+          {pendingComp && (
+            <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2.5">
+              <CheckCircle2 size={16} className="text-indigo-500 shrink-0" />
+              <p className="flex-1 text-xs font-medium text-indigo-700">
+                Compensação programada para hoje: <b>−{formatMinutes(pendingComp.minutes)}</b>{" "}
+                (de {formatDateShortBR(pendingComp.sourceDate)})
+                {pendingComp.note ? ` · ${pendingComp.note}` : ""}
+              </p>
+              <Button variant="secondary" size="sm" onClick={() => finishComp(pendingComp.id)}>
+                <CheckCircle2 size={13} /> Concluir compensação
+              </Button>
+            </div>
+          )}
+
+          {/* Segmentos */}
           {d.segments.length > 0 && (
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {d.segments.map((s, i) => (
@@ -177,17 +199,23 @@ export function DayCard({ result, settings, onDone }: Props) {
             </div>
           )}
 
+          {/* Registros */}
           <div className="mt-4 space-y-2">
             {d.entries.map((e) =>
-              editingId === String(e.id) ? (
+              editingId === e.id ? (
                 <div key={e.id} className="flex flex-wrap items-end gap-2 rounded-xl border border-emerald-200 bg-emerald-50/50 p-3">
-                  <Select label="Tipo" className="w-32" value={editForm.type} onChange={(ev) => setEditForm({ ...editForm, type: ev.target.value as EntryType })}>
+                  <Select
+                    label="Tipo"
+                    className="w-32"
+                    value={editForm.type}
+                    onChange={(ev) => setEditForm({ ...editForm, type: ev.target.value as EntryType })}
+                  >
                     <option value="entrada">Entrada</option>
                     <option value="saida">Saída</option>
                   </Select>
                   <Input label="Horário" type="time" className="w-32" value={editForm.time} onChange={(ev) => setEditForm({ ...editForm, time: ev.target.value })} />
                   <Input label="Observação" className="min-w-[160px] flex-1" value={editForm.note} onChange={(ev) => setEditForm({ ...editForm, note: ev.target.value })} />
-                  <Button size="sm" loading={busy} onClick={saveEdit}>Salvar</Button>
+                  <Button size="sm" loading={busy} onClick={() => saveEdit(e.id)}>Salvar</Button>
                   <Button size="sm" variant="ghost" onClick={() => setEditingId(null)}>Cancelar</Button>
                 </div>
               ) : (
@@ -197,10 +225,10 @@ export function DayCard({ result, settings, onDone }: Props) {
                   <Badge tone={e.type === "entrada" ? "emerald" : "indigo"}>{e.type === "entrada" ? "Entrada" : "Saída"}</Badge>
                   {e.note && <span className="hidden truncate text-xs text-slate-400 sm:block">· {e.note}</span>}
                   <div className="ml-auto flex items-center gap-1 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
-                    <button onClick={() => startEdit(e)} className="rounded-lg p-1.5 text-slate-400 hover:bg-white hover:text-slate-700" aria-label="Editar">
+                    <button onClick={() => startEdit(e)} className="rounded-lg p-1.5 text-slate-400 hover:bg-white hover:text-slate-700 cursor-pointer" aria-label="Editar">
                       <Pencil size={14} />
                     </button>
-                    <button onClick={() => remove(String(e.id))} className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500" aria-label="Excluir">
+                    <button onClick={() => remove(e.id)} className="rounded-lg p-1.5 text-slate-400 hover:bg-rose-50 hover:text-rose-500 cursor-pointer" aria-label="Excluir">
                       <Trash2 size={14} />
                     </button>
                   </div>
@@ -208,36 +236,55 @@ export function DayCard({ result, settings, onDone }: Props) {
               ),
             )}
 
+            {/* Formulário adicionar */}
             {showAdd ? (
               <div className="flex flex-wrap items-end gap-2 rounded-xl border border-dashed border-slate-300 bg-white p-3">
-                <Select label="Tipo" className="w-32" value={form.type} onChange={(ev) => setForm({ ...form, type: ev.target.value as EntryType })}>
+                <Select
+                  label="Tipo"
+                  className="w-32"
+                  value={form.type}
+                  onChange={(ev) => setForm({ ...form, type: ev.target.value as EntryType })}
+                >
                   <option value="entrada">Entrada</option>
                   <option value="saida">Saída</option>
                 </Select>
                 <Input label="Horário" type="time" className="w-32" value={form.time} onChange={(ev) => setForm({ ...form, time: ev.target.value })} />
-                <Input label="Observação" className="min-w-[160px] flex-1" value={form.note} onChange={(ev) => setForm({ ...form, note: ev.target.value })} />
+                <Input label="Observação (opcional)" className="min-w-[160px] flex-1" value={form.note} onChange={(ev) => setForm({ ...form, note: ev.target.value })} />
                 <Button size="sm" loading={busy} onClick={() => add()}>
                   <Plus size={13} /> Adicionar
                 </Button>
                 <Button size="sm" variant="ghost" onClick={() => setShowAdd(false)}>Cancelar</Button>
               </div>
             ) : (
-              <button onClick={() => { setShowAdd(true); setForm((f) => ({ ...f, time: nowTimeString() })); }} className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-slate-300 py-2.5 text-xs font-bold text-slate-500 transition-colors hover:border-emerald-400 hover:text-emerald-600 cursor-pointer">
+              <button
+                onClick={() => { setShowAdd(true); setForm((f) => ({ ...f, time: nowTimeString() })); }}
+                className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-slate-300 py-2.5 text-xs font-bold text-slate-500 transition-colors hover:border-emerald-400 hover:text-emerald-600 cursor-pointer"
+              >
                 <Plus size={14} /> Adicionar registro manual
               </button>
             )}
           </div>
 
+          {/* Atalhos */}
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Atalhos:</span>
-            <Button variant="ghost" size="sm" onClick={() => add("entrada", nowTimeString())}><LogIn size={13} /> Entrada agora</Button>
-            <Button variant="ghost" size="sm" onClick={() => add("saida", nowTimeString())}><LogOut size={13} /> Saída agora</Button>
-            <Button variant="ghost" size="sm" onClick={() => add("saida", settings.lunchStart)}><Coffee size={13} /> Almoço {settings.lunchStart}</Button>
-            <Button variant="ghost" size="sm" onClick={() => add("entrada", settings.lunchEnd)}><Zap size={13} /> Volta {settings.lunchEnd}</Button>
+            <Button variant="ghost" size="sm" onClick={() => add("entrada", nowTimeString())}>
+              <LogIn size={13} /> Entrada agora
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => add("saida", nowTimeString())}>
+              <LogOut size={13} /> Saída agora
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => add("saida", settings.lunchStart)}>
+              <Coffee size={13} /> Almoço {settings.lunchStart}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => add("entrada", settings.lunchEnd)}>
+              <Zap size={13} /> Volta {settings.lunchEnd}
+            </Button>
           </div>
 
           <p className="mt-3 text-[11px] text-slate-400">
-            * "No ponto" é o total que pode ser lançado no sistema da empresa (limitado a {formatMinutes(settings.maxDailyMinutes)}/dia).
+            * "No ponto" é o total que pode ser lançado no sistema da empresa (limitado a{" "}
+            {formatMinutes(settings.maxDailyMinutes)}/dia). O excedente deve ser compensado em outro dia.
           </p>
         </div>
       )}
@@ -245,8 +292,12 @@ export function DayCard({ result, settings, onDone }: Props) {
       <CompensationForm
         open={compOpen}
         onClose={() => setCompOpen(false)}
-        initial={d.excessMinutes > 0 ? { sourceDate: d.date, targetDate: nextWorkday(d.date), minutes: d.excessMinutes, note: `Compensação do dia ${formatDateShortBR(d.date)}` } : undefined}
-        onSave={createComp}
+        initial={
+          d.excessMinutes > 0
+            ? { sourceDate: d.date, targetDate: nextWorkday(d.date), minutes: d.excessMinutes, note: `Compensação do dia ${formatDateShortBR(d.date)}` }
+            : undefined
+        }
+        onSave={onCreateComp}
       />
     </section>
   );

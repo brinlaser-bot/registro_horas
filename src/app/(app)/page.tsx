@@ -1,124 +1,170 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { CalendarClock, Clock3, PlusCircle, Timer, TriangleAlert, Wallet, ArrowLeftRight } from "lucide-react";
-import { getEntries, getEntriesByDate, todayString as todayStr, getPendingCompensations, getSettings } from "@/lib/storage";
-import { useSyncStorage } from "@/lib/use-storage-state";
-import { computeDay, formatMinutes, monthKey, nowMinutesLocal, weekdayShort } from "@/lib/time";
+import {
+  ArrowLeftRight,
+  CalendarClock,
+  Clock3,
+  PlusCircle,
+  Timer,
+  TriangleAlert,
+  Wallet,
+} from "lucide-react";
+import { actions, enrichComp, settingsOf, useAppData, useIsClient } from "@/lib/store";
+import {
+  addDays,
+  computeDay,
+  formatDateShortBR,
+  formatMinutes,
+  monthKey,
+  nowMinutesLocal,
+  todayString,
+  weekdayShort,
+  type EntryType,
+} from "@/lib/time";
+import type { DayResult, DaySummary } from "@/lib/types";
+import { Badge, Button, Card, EmptyState, Skeleton, StatCard } from "@/components/ui";
 import { QuickPunch } from "@/components/quick-punch";
 import { BarsChart, type BarDatum } from "@/components/charts";
 import { CompensationForm } from "@/components/compensation-form";
-import { Badge, Button, Card, EmptyState, StatCard } from "@/components/ui";
 import { useToast } from "@/components/toast";
-import { addCompensation } from "@/lib/storage";
+
+function toSummary(d: DayResult, date?: string): DaySummary {
+  return {
+    date: date ?? d.date,
+    workedMinutes: d.workedMinutes,
+    expectedMinutes: d.expectedMinutes,
+    balanceMinutes: d.balanceMinutes,
+    excessMinutes: d.excessMinutes,
+    registrableMinutes: d.registrableMinutes,
+    status: d.status,
+    open: d.open,
+    entryCount: d.entries.length,
+  };
+}
 
 export default function DashboardPage() {
   const toast = useToast();
-  const sync = useSyncStorage();
+  const mounted = useIsClient();
+  const { user, entries, compensations } = useAppData();
+  const settings = settingsOf(user);
+  const month = monthKey(todayString());
+  const todayStr = todayString();
   const [compOpen, setCompOpen] = useState(false);
-  const [refresh, setRefresh] = useState(0);
 
-  // Recarrega dados quando o storage muda (outra aba ou ação interna)
-  const refreshAll = useCallback(() => setRefresh((r) => r + 1), []);
+  // Mantém as horas "em andamento" atualizadas a cada 30s
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = window.setInterval(() => setTick((n) => n + 1), 30_000);
+    return () => window.clearInterval(t);
+  }, []);
 
-  const today = useMemo(() => {
-    const settings = getSettings();
-    return computeDay(getEntriesByDate(todayStr()), settings, nowMinutesLocal());
-  }, [refresh]);
-
-  const settings = useMemo(() => getSettings(), [refresh]);
-  const month = monthKey(todayStr());
-  const pending = useMemo(() => getPendingCompensations(), [refresh]);
-
-  // Últimos 14 dias para gráfico
-  const chartData: BarDatum[] = useMemo(() => {
-    const allEntries = getEntries();
-    const data: BarDatum[] = [];
-    for (let i = 13; i >= 0; i--) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const ds = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      const ents = allEntries.filter((e) => e.date === ds);
-      const res = computeDay(ents, settings);
-      data.push({
-        label: d.getDate().toString(),
-        value: res.workedMinutes,
-        baseline: res.expectedMinutes,
-        cap: settings.maxDailyMinutes,
-        status: res.status,
-      });
-    }
-    return data;
-  }, [refresh, settings]);
-
-  // Totais do mês
-  const totals = useMemo(() => {
-    const entries = getEntries().filter((e) => e.date.startsWith(month));
+  const { monthDays, totals, today, recent, pending } = useMemo(() => {
     const byDate = new Map<string, typeof entries>();
     for (const e of entries) {
-      const list = byDate.get(e.date) ?? [];
-      list.push(e);
-      byDate.set(e.date, list);
+      if (e.date.startsWith(month)) {
+        byDate.set(e.date, [...(byDate.get(e.date) ?? []), e]);
+      }
     }
-    return [...byDate.entries()].reduce(
-      (acc, [_, ents]) => {
-        const d = computeDay(ents, settings);
-        return {
-          trackedDays: acc.trackedDays + 1,
-          workedTotal: acc.workedTotal + d.workedMinutes,
-          registrableTotal: acc.registrableTotal + d.registrableMinutes,
-          balanceTotal: acc.balanceTotal + d.balanceMinutes,
-          excessTotal: acc.excessTotal + d.excessMinutes,
-        };
+
+    const days: DaySummary[] = [];
+    for (const [date, list] of byDate) {
+      days.push(toSummary(computeDay(list, settings), date));
+    }
+    days.sort((a, b) => a.date.localeCompare(b.date));
+
+    const sum = days.reduce(
+      (acc, d) => {
+        acc.trackedDays += 1;
+        acc.workedTotal += d.workedMinutes;
+        acc.registrableTotal += d.registrableMinutes;
+        acc.balanceTotal += d.balanceMinutes;
+        acc.excessTotal += d.excessMinutes;
+        return acc;
       },
       { trackedDays: 0, workedTotal: 0, registrableTotal: 0, balanceTotal: 0, excessTotal: 0 },
     );
-  }, [month, refresh, settings]);
 
-  // Dias recentes com entradas
-  const recentDays = useMemo(() => {
-    const allEntries = getEntries();
-    const days: ReturnType<typeof computeDay>[] = [];
-    for (let i = 0; i <= 13; i++) {
-      const d = new Date();
-      d.setDate(d.getDate() - i);
-      const ds = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-      const ents = allEntries.filter((e) => e.date === ds);
-      if (ents.length > 0) days.push(computeDay(ents, settings));
+    const todays = computeDay(byDate.get(todayStr) ?? [], settings, nowMinutesLocal());
+    if (!todays.date) todays.date = todayStr;
+
+    const recents: DaySummary[] = [];
+    for (let i = 13; i >= 0; i--) {
+      const d = addDays(todayStr, -i);
+      recents.push(toSummary(computeDay(entries.filter((e) => e.date === d), settings), d));
     }
-    return days.reverse();
-  }, [refresh, settings]);
 
-  const completeComp = (id: string) => {
-    const { updateCompensation } = require("@/lib/storage");
-    updateCompensation(id, { status: "concluida" });
+    const pend = compensations
+      .filter((c) => c.status === "pendente")
+      .map((c) => enrichComp(c, entries, settings))
+      .sort((a, b) => a.targetDate.localeCompare(b.targetDate));
+
+    return { monthDays: days, totals: sum, today: todays, recent: recents, pending: pend };
+  }, [entries, compensations, settings, month, todayStr]);
+
+  const onAddEntry = async (p: { date: string; time: string; type: EntryType; note: string | null }) => {
+    actions.addEntry(p);
+  };
+
+  const onDeleteEntry = async (id: number) => {
+    actions.deleteEntry(id);
+  };
+
+  const completeComp = async (id: number) => {
+    actions.completeComp(id);
     toast.show("Compensação concluída. Bom descanso!");
-    refreshAll();
   };
 
-  const createComp = (data: { sourceDate: string; targetDate: string; minutes: number; note: string }) => {
-    addCompensation(data);
-    toast.show("Compensação criada!");
+  const createComp = async (payload: { sourceDate: string; targetDate: string; minutes: number; note: string }) => {
+    actions.addComp({ ...payload, note: payload.note || null });
     setCompOpen(false);
-    refreshAll();
+    toast.show("Compensação criada!");
   };
 
-  const todayStatusTone = today.status === "excess" ? "rose" : today.status === "deficit" ? "amber" : today.status === "in-progress" ? "indigo" : "slate";
+  if (!mounted) {
+    return (
+      <div className="space-y-6">
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-28" />)}
+        </div>
+        <Skeleton className="h-56" />
+        <div className="grid gap-6 lg:grid-cols-2">
+          <Skeleton className="h-64" />
+          <Skeleton className="h-64" />
+        </div>
+      </div>
+    );
+  }
+
+  const t = today;
   const balanceTone = totals.balanceTotal > 0 ? "emerald" : totals.balanceTotal < 0 ? "rose" : "slate";
   const excessTone = totals.excessTotal > 0 ? "amber" : "slate";
+  const todayStatusTone = t.status === "excess" ? "rose" : t.status === "deficit" ? "amber" : t.status === "in-progress" ? "indigo" : "slate";
+  const firstName = user.name.split(" ")[0];
+
+  const chartData: BarDatum[] = recent.map((d) => ({
+    label: weekdayShort(d.date).replace(".", ""),
+    value: d.workedMinutes,
+    baseline: d.expectedMinutes,
+    cap: settings.maxDailyMinutes,
+    status: d.status,
+  }));
+
+  const recentDays = [...recent].filter((d) => d.entryCount > 0).slice(-7).reverse();
 
   return (
     <div className="space-y-6">
+      {/* Cabeçalho */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h2 className="text-xl font-extrabold tracking-tight text-slate-900">
-            Olá! Aqui está seu resumo 👋
+            Olá, {firstName}! 👋
           </h2>
           <p className="text-sm text-slate-500">
-            {today.entries.length === 0
+            {t.empty
               ? "Você ainda não bateu o ponto hoje. Registre sua entrada abaixo."
-              : today.open
+              : t.open
                 ? "Seu ponto de hoje está em andamento."
                 : "Seu ponto de hoje está fechado."}
           </p>
@@ -130,15 +176,17 @@ export default function DashboardPage() {
         </Link>
       </div>
 
+      {/* Indicadores */}
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
         <StatCard
           label="Hoje"
-          value={formatMinutes(today.workedMinutes)}
+          value={formatMinutes(t.workedMinutes)}
           sub={
             <>
-              base {formatMinutes(today.expectedMinutes)} ·{" "}
-              <span className={today.balanceMinutes >= 0 ? "text-emerald-600" : "text-rose-600"}>
-                {today.balanceMinutes >= 0 ? "+" : ""}{formatMinutes(today.balanceMinutes)}
+              base {formatMinutes(t.expectedMinutes)} ·{" "}
+              <span className={t.balanceMinutes >= 0 ? "text-emerald-600" : "text-rose-600"}>
+                {t.balanceMinutes >= 0 ? "+" : ""}
+                {formatMinutes(t.balanceMinutes)}
               </span>
             </>
           }
@@ -155,22 +203,34 @@ export default function DashboardPage() {
         <StatCard
           label="Excedente do mês"
           value={formatMinutes(totals.excessTotal)}
-          sub={`acima de ${formatMinutes(settings.maxDailyMinutes)}/dia · ${totals.trackedDays} dia(s)`}
+          sub={`acima de ${formatMinutes(settings.maxDailyMinutes)}/dia · ${totals.trackedDays} dia(s) registrados`}
           tone={excessTone}
           icon={<TriangleAlert size={16} />}
         />
         <StatCard
           label="Compensações pendentes"
           value={pending.length}
-          sub={pending.length > 0 ? `${formatMinutes(pending.reduce((s, c) => s + c.minutes, 0))} a compensar` : "tudo em dia 🎉"}
+          sub={
+            pending.length > 0
+              ? `${formatMinutes(pending.reduce((s, c) => s + c.minutes, 0))} a compensar`
+              : "tudo em dia 🎉"
+          }
           tone={pending.length > 0 ? "indigo" : "slate"}
           icon={<ArrowLeftRight size={16} />}
         />
       </div>
 
-      <QuickPunch today={today} todayStr={todayStr()} settings={settings} onDone={refreshAll} />
+      {/* Registro rápido */}
+      <QuickPunch
+        today={t}
+        todayStr={todayStr}
+        settings={settings}
+        onAddEntry={onAddEntry}
+        onDeleteEntry={onDeleteEntry}
+      />
 
       <div className="grid gap-6 lg:grid-cols-2">
+        {/* Compensações pendentes */}
         <Card
           title="Compensações pendentes"
           subtitle="Horas excedentes que precisam ser compensadas"
@@ -194,12 +254,14 @@ export default function DashboardPage() {
                     <p className="text-sm font-bold text-slate-800">
                       Compensar {formatMinutes(c.minutes)}{" "}
                       <span className="font-medium text-slate-400">
-                        (excedente de {c.sourceDate.slice(8)}/{c.sourceDate.slice(5, 7)})
+                        (excedente de {formatDateShortBR(c.sourceDate)})
                       </span>
                     </p>
                     <p className="mt-0.5 text-xs text-slate-500">
-                      {c.targetDate === todayStr() ? <span className="font-bold text-indigo-600">Hoje · </span> : null}
-                      até {c.targetDate.slice(8)}/{c.targetDate.slice(5, 7)}
+                      {c.targetDate === todayStr && (
+                        <span className="font-bold text-indigo-600">Hoje · </span>
+                      )}
+                      até {formatDateShortBR(c.targetDate)}
                       {c.note ? ` · ${c.note}` : ""}
                     </p>
                   </div>
@@ -213,11 +275,13 @@ export default function DashboardPage() {
           )}
         </Card>
 
+        {/* Últimos 14 dias */}
         <Card title="Últimos 14 dias" subtitle="Horas trabalhadas por dia vs. base diária">
           <BarsChart data={chartData} height={150} />
         </Card>
       </div>
 
+      {/* Dias recentes */}
       <Card title="Dias recentes" subtitle="Seus últimos dias com registro">
         {recentDays.length === 0 ? (
           <EmptyState
@@ -231,12 +295,19 @@ export default function DashboardPage() {
               <Link key={d.date} href="/registros" className="flex items-center gap-3 py-3 transition-colors hover:bg-slate-50/70">
                 <span className="w-24 shrink-0 text-sm font-bold text-slate-800">
                   {weekdayShort(d.date).replace(".", "")}
-                  <span className="ml-1.5 font-medium text-slate-400">{d.date.slice(8)}/{d.date.slice(5, 7)}</span>
+                  <span className="ml-1.5 font-medium text-slate-400">{formatDateShortBR(d.date)}</span>
                 </span>
-                <span className="hidden text-xs text-slate-400 sm:block">{d.entries.length} batida(s)</span>
-                <span className="ml-auto text-sm font-extrabold tabular-nums text-slate-900">{formatMinutes(d.workedMinutes)}</span>
-                <span className={`w-20 text-right text-xs font-bold tabular-nums ${d.balanceMinutes > 0 ? "text-emerald-600" : d.balanceMinutes < 0 ? "text-rose-600" : "text-slate-400"}`}>
-                  {d.balanceMinutes >= 0 ? "+" : ""}{formatMinutes(d.balanceMinutes)}
+                <span className="hidden text-xs text-slate-400 sm:block">{d.entryCount} batida(s)</span>
+                <span className="ml-auto text-sm font-extrabold tabular-nums text-slate-900">
+                  {formatMinutes(d.workedMinutes)}
+                </span>
+                <span
+                  className={`w-20 text-right text-xs font-bold tabular-nums ${
+                    d.balanceMinutes > 0 ? "text-emerald-600" : d.balanceMinutes < 0 ? "text-rose-600" : "text-slate-400"
+                  }`}
+                >
+                  {d.balanceMinutes >= 0 ? "+" : ""}
+                  {formatMinutes(d.balanceMinutes)}
                 </span>
                 {d.excessMinutes > 0 ? <Badge tone="rose">+10h</Badge> : <Badge tone="slate">ok</Badge>}
               </Link>
@@ -245,7 +316,7 @@ export default function DashboardPage() {
         )}
       </Card>
 
-      <CompensationForm open={compOpen} onClose={() => setCompOpen(false)} onSave={(data) => { addCompensation(data); toast.show("Compensação criada!"); setCompOpen(false); refreshAll(); }} />
+      <CompensationForm open={compOpen} onClose={() => setCompOpen(false)} onSave={createComp} />
     </div>
   );
 }

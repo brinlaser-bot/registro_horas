@@ -1,7 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
-import useSWR from "swr";
+import { useMemo, useState } from "react";
 import {
   ArrowLeftRight,
   CheckCircle2,
@@ -10,78 +9,81 @@ import {
   Trash2,
   XCircle,
 } from "lucide-react";
-import {
-  getCompensations,
-  updateCompensation as storageUpdateComp,
-  deleteCompensation as storageDeleteComp,
-  addCompensation as storageAddComp,
-  getEntries,
-  getSettings,
-} from "@/lib/storage";
-import { useSyncStorage } from "@/lib/use-storage-state";
-import { computeDay, formatDateBR, formatDateShortBR, formatMinutes, todayString as todayStr } from "@/lib/time";
-import { Badge, Button, Card, EmptyState } from "@/components/ui";
-import { CompensationForm, type CompFormData } from "@/components/compensation-form";
+import { actions, enrichComp, settingsOf, useAppData, useIsClient } from "@/lib/store";
+import { formatDateBR, formatDateShortBR, formatMinutes, todayString } from "@/lib/time";
+import { Badge, Button, EmptyState, Skeleton } from "@/components/ui";
+import { CompensationForm } from "@/components/compensation-form";
 import { useToast } from "@/components/toast";
 
 export default function CompensacoesPage() {
   const toast = useToast();
-  const sync = useSyncStorage();
-  const [refresh, setRefresh] = useState(0);
+  const mounted = useIsClient();
+  const { user, entries, compensations } = useAppData();
+  const settings = settingsOf(user);
   const [modalOpen, setModalOpen] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editing, setEditing] = useState<number | null>(null);
 
-  const compensations = useMemo(() => getCompensations(), [refresh]);
-  const settings = useMemo(() => getSettings(), [refresh]);
-  const allEntries = useMemo(() => getEntries(), [refresh]);
+  const list = useMemo(
+    () =>
+      [...compensations]
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .map((c) => enrichComp(c, entries, settings)),
+    [compensations, entries, settings],
+  );
 
-  const getDayInfo = (date: string) => {
-    const ents = allEntries.filter((e) => e.date === date);
-    return computeDay(ents, settings);
-  };
+  const pendingEditing = editing !== null ? compensations.find((c) => c.id === editing) : null;
 
-  const pendentes = compensations.filter((c) => c.status === "pendente");
-  const concluidas = compensations.filter((c) => c.status === "concluida");
-  const pendingMinutes = pendentes.reduce((s, c) => s + c.minutes, 0);
-
-  const save = (data: CompFormData & { status?: string }) => {
-    if (editingId) {
-      storageUpdateComp(editingId, {
-        sourceDate: data.sourceDate,
-        targetDate: data.targetDate,
-        minutes: data.minutes,
-        note: data.note || null,
-        status: data.status as "pendente" | "concluida" | "cancelada" | undefined,
+  const save = async (payload: {
+    sourceDate: string;
+    targetDate: string;
+    minutes: number;
+    note: string;
+    status?: string;
+  }) => {
+    if (pendingEditing) {
+      actions.updateComp(pendingEditing.id, {
+        sourceDate: payload.sourceDate,
+        targetDate: payload.targetDate,
+        minutes: payload.minutes,
+        note: payload.note || null,
+        ...(payload.status ? { status: payload.status as "pendente" | "concluida" | "cancelada" } : {}),
       });
       toast.show("Compensação atualizada.");
     } else {
-      storageAddComp({
-        sourceDate: data.sourceDate,
-        targetDate: data.targetDate,
-        minutes: data.minutes,
-        note: data.note || null,
+      actions.addComp({
+        sourceDate: payload.sourceDate,
+        targetDate: payload.targetDate,
+        minutes: payload.minutes,
+        note: payload.note || null,
       });
       toast.show("Compensação criada!");
     }
     setModalOpen(false);
-    setEditingId(null);
-    setRefresh((r) => r + 1);
+    setEditing(null);
   };
 
-  const setStatus = (id: string, status: "concluida" | "cancelada") => {
-    storageUpdateComp(id, { status });
+  const setStatus = async (id: number, status: string) => {
+    actions.updateComp(id, { status: status as "pendente" | "concluida" | "cancelada" });
     toast.show(status === "concluida" ? "Compensação concluída!" : "Compensação cancelada.");
-    setRefresh((r) => r + 1);
   };
 
-  const remove = (id: string) => {
+  const remove = async (id: number) => {
     if (!window.confirm("Excluir esta compensação?")) return;
-    storageDeleteComp(id);
+    actions.deleteComp(id);
     toast.show("Compensação excluída.");
-    setRefresh((r) => r + 1);
   };
 
-  const editing = compensations.find((c) => c.id === editingId);
+  if (!mounted) {
+    return (
+      <div className="space-y-4">
+        {[...Array(3)].map((_, i) => <Skeleton key={i} className="h-28" />)}
+      </div>
+    );
+  }
+
+  const pendentes = list.filter((c) => c.status === "pendente");
+  const concluidas = list.filter((c) => c.status === "concluida");
+  const pendingMinutes = pendentes.reduce((s, c) => s + c.minutes, 0);
 
   return (
     <div className="space-y-6">
@@ -92,14 +94,21 @@ export default function CompensacoesPage() {
             Excedentes acima do limite diário devem ser compensados em outros dias.
           </p>
         </div>
-        <Button onClick={() => { setEditingId(null); setModalOpen(true); }}>
+        <Button
+          onClick={() => {
+            setEditing(null);
+            setModalOpen(true);
+          }}
+        >
           <PlusCircle size={15} /> Nova compensação
         </Button>
       </div>
 
       {pendentes.length > 0 && (
         <div className="flex flex-wrap gap-3 rounded-2xl border border-indigo-200 bg-indigo-50 px-4 py-3 text-sm font-semibold text-indigo-700">
-          <span className="inline-flex items-center gap-1.5"><ArrowLeftRight size={15} /> {pendentes.length} pendente(s)</span>
+          <span className="inline-flex items-center gap-1.5">
+            <ArrowLeftRight size={15} /> {pendentes.length} pendente(s)
+          </span>
           <span>·</span>
           <span>{formatMinutes(pendingMinutes)} a compensar</span>
           <span>·</span>
@@ -107,72 +116,127 @@ export default function CompensacoesPage() {
         </div>
       )}
 
-      {compensations.length === 0 ? (
+      {list.length === 0 ? (
         <EmptyState
           icon={<ArrowLeftRight size={26} />}
           title="Nenhuma compensação registrada"
-          description="Quando um dia passar do limite de 10h, crie uma compensação."
-          action={<Button onClick={() => { setEditingId(null); setModalOpen(true); }}><PlusCircle size={15} /> Criar primeira compensação</Button>}
+          description="Quando um dia passar do limite de 10h, crie uma compensação para registrar as horas em outro dia."
+          action={
+            <Button
+              onClick={() => {
+                setEditing(null);
+                setModalOpen(true);
+              }}
+            >
+              <PlusCircle size={15} /> Criar primeira compensação
+            </Button>
+          }
         />
       ) : (
         <div className="space-y-3">
-          {compensations.map((c) => {
-            const sourceInfo = getDayInfo(c.sourceDate);
-            const targetInfo = getDayInfo(c.targetDate);
-            return (
-              <div key={c.id} className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition-shadow hover:shadow-md">
-                <div className="flex flex-wrap items-center gap-3">
-                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-indigo-600/10">
-                    <ArrowLeftRight size={20} />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-extrabold text-slate-900">
-                      {formatMinutes(c.minutes)}{" "}
-                      <span className="font-medium text-slate-400">
-                        — {formatDateBR(c.sourceDate)} → {formatDateBR(c.targetDate)}
+          {list.map((c) => (
+            <div
+              key={c.id}
+              className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm transition-shadow hover:shadow-md"
+            >
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-indigo-600/10">
+                  <ArrowLeftRight size={20} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-extrabold text-slate-900">
+                    {formatMinutes(c.minutes)}{" "}
+                    <span className="font-medium text-slate-400">
+                      — {formatDateBR(c.sourceDate)} → {formatDateBR(c.targetDate)}
+                    </span>
+                  </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+                    {c.sourceDay && (
+                      <span>
+                        origem: <b>{formatMinutes(c.sourceDay.workedMinutes)}</b> trabalhados
+                        {c.sourceDay.excessMinutes > 0 && (
+                          <span className="text-rose-500">
+                            ({formatMinutes(c.sourceDay.excessMinutes)} excedente)
+                          </span>
+                        )}
                       </span>
-                    </p>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
-                      {!sourceInfo.empty && (
-                        <span>
-                          origem: <b>{formatMinutes(sourceInfo.workedMinutes)}</b> trabalhados
-                          {sourceInfo.excessMinutes > 0 && <span className="text-rose-500"> ({formatMinutes(sourceInfo.excessMinutes)} excedente)</span>}
-                        </span>
-                      )}
-                      {!targetInfo.empty && (
-                        <span>
-                          destino: <b>{formatMinutes(targetInfo.workedMinutes)}</b> trabalhados
-                          {targetInfo.balanceMinutes < 0 && <span className="text-amber-600"> ({formatMinutes(targetInfo.balanceMinutes)} saldo)</span>}
-                        </span>
-                      )}
-                      {c.note && <span className="italic">"{c.note}"</span>}
-                    </div>
-                  </div>
-                  {c.status === "pendente" && <Badge tone="indigo">Pendente</Badge>}
-                  {c.status === "concluida" && <Badge tone="emerald"><CheckCircle2 size={12} /> Concluída</Badge>}
-                  {c.status === "cancelada" && <Badge tone="slate">Cancelada</Badge>}
-                  <div className="flex items-center gap-1">
-                    {c.status === "pendente" && (
-                      <>
-                        <Button size="sm" variant="subtle" onClick={() => setStatus(c.id, "concluida")}><CheckCircle2 size={13} /> Concluir</Button>
-                        <Button size="sm" variant="ghost" onClick={() => setStatus(c.id, "cancelada")}><XCircle size={13} /> Cancelar</Button>
-                      </>
                     )}
-                    <Button size="sm" variant="ghost" onClick={() => { setEditingId(c.id); setModalOpen(true); }}><Pencil size={14} /></Button>
-                    <Button size="sm" variant="ghost" onClick={() => remove(c.id)} className="!text-rose-500 hover:!bg-rose-50"><Trash2 size={14} /></Button>
+                    {c.targetDay && (
+                      <span>
+                        destino: <b>{formatMinutes(c.targetDay.workedMinutes)}</b> trabalhados
+                        {c.targetDay.balanceMinutes < 0 && (
+                          <span className="text-amber-600">
+                            ({formatMinutes(c.targetDay.balanceMinutes)} de saldo)
+                          </span>
+                        )}
+                      </span>
+                    )}
+                    {c.note && <span className="italic">“{c.note}”</span>}
                   </div>
                 </div>
+                {c.status === "pendente" && <Badge tone="indigo">Pendente</Badge>}
+                {c.status === "concluida" && (
+                  <Badge tone="emerald">
+                    <CheckCircle2 size={12} /> Concluída
+                  </Badge>
+                )}
+                {c.status === "cancelada" && <Badge tone="slate">Cancelada</Badge>}
+                <div className="flex items-center gap-1">
+                  {c.status === "pendente" && (
+                    <>
+                      <Button size="sm" variant="subtle" onClick={() => setStatus(c.id, "concluida")}>
+                        <CheckCircle2 size={13} /> Concluir
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setStatus(c.id, "cancelada")}>
+                        <XCircle size={13} /> Cancelar
+                      </Button>
+                    </>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setEditing(c.id);
+                      setModalOpen(true);
+                    }}
+                    aria-label="Editar"
+                  >
+                    <Pencil size={14} />
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => remove(c.id)}
+                    aria-label="Excluir"
+                    className="!text-rose-500 hover:!bg-rose-50"
+                  >
+                    <Trash2 size={14} />
+                  </Button>
+                </div>
               </div>
-            );
-          })}
+            </div>
+          ))}
         </div>
       )}
 
       <CompensationForm
         open={modalOpen}
-        onClose={() => { setModalOpen(false); setEditingId(null); }}
-        editingId={editingId}
-        initial={editing ? { sourceDate: editing.sourceDate, targetDate: editing.targetDate, minutes: editing.minutes, note: editing.note ?? "", status: editing.status } : undefined}
+        onClose={() => {
+          setModalOpen(false);
+          setEditing(null);
+        }}
+        editingId={editing}
+        initial={
+          pendingEditing
+            ? {
+                sourceDate: pendingEditing.sourceDate,
+                targetDate: pendingEditing.targetDate,
+                minutes: pendingEditing.minutes,
+                note: pendingEditing.note ?? "",
+                status: pendingEditing.status,
+              }
+            : undefined
+        }
         onSave={save}
       />
     </div>

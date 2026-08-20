@@ -18,8 +18,8 @@ interface Props {
   open: boolean;
   onClose: () => void;
   initial?: CompFormData;
-  editingId?: string | null;
-  onSave: (data: CompFormData & { status?: string }) => void;
+  editingId?: number | null;
+  onSave: (data: CompFormData & { status?: string }) => Promise<void>;
 }
 
 export function CompensationForm({ open, onClose, initial, editingId, onSave }: Props) {

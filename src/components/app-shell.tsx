@@ -13,6 +13,7 @@ import {
   Settings,
   X,
 } from "lucide-react";
+import { useAppData, useIsClient } from "@/lib/store";
 
 const NAV = [
   { href: "/", label: "Visão geral", icon: LayoutDashboard },
@@ -36,9 +37,11 @@ function initials(name: string): string {
     .join("");
 }
 
-export function AppShell({ user, children }: { user: { name: string; email: string }; children: React.ReactNode }) {
+export function AppShell({ children }: { children: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const pathname = usePathname();
+  const mounted = useIsClient();
+  const { user } = useAppData();
 
   const today = new Date().toLocaleDateString("pt-BR", {
     weekday: "long",
@@ -86,11 +89,15 @@ export function AppShell({ user, children }: { user: { name: string; email: stri
       <div className="border-t border-white/10 p-4">
         <div className="flex items-center gap-3">
           <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-xs font-extrabold text-white">
-            {initials(user.name)}
+            {mounted ? initials(user.name) : "…"}
           </div>
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-bold text-white">{user.name}</p>
-            <p className="truncate text-[11px] text-slate-400">{user.email}</p>
+            <p className="truncate text-sm font-bold text-white">
+              {mounted ? user.name : "Carregando…"}
+            </p>
+            <p className="truncate text-[11px] text-slate-400">
+              {mounted ? user.email : ""}
+            </p>
           </div>
           <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-300 ring-1 ring-inset ring-emerald-500/30">
             Você

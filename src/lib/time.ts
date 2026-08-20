@@ -7,7 +7,7 @@
 export type EntryType = "entrada" | "saida";
 
 export interface TimeEntryLike {
-  id: string | number;
+  id: number;
   date: string;
   time: string; // HH:MM
   type: EntryType;
