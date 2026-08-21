@@ -1,46 +1,46 @@
-import { and, eq, inArray } from "drizzle-orm";
-import { db } from "@/db";
-import { timeEntries, type Compensation } from "@/db/schema";
 import { computeDay, type WorkSettings } from "@/lib/time";
-import type { CompWithDays } from "@/lib/types";
+import type { CompStatus, Compensation, CompWithDays, TimeEntry } from "@/lib/types";
 
-/** Enriquece compensações com o resumo dos dias de origem/destino. */
-export async function enrichCompensations(
+function normalizeStatus(status: Compensation["status"]): CompStatus {
+  if (status === "pendente" || status === "concluida" || status === "cancelada") {
+    return status;
+  }
+  return "pendente";
+}
+
+/**
+ * Enriquece compensações com o resumo dos dias de origem/destino.
+ * Mantido apenas para compatibilidade de tipagem e builds antigos.
+ */
+export function enrichCompensations(
   comps: Compensation[],
+  entries: TimeEntry[],
   settings: WorkSettings,
-): Promise<CompWithDays[]> {
-  if (comps.length === 0) return [];
-
-  const dates = new Set<string>();
-  for (const c of comps) {
-    dates.add(c.sourceDate);
-    dates.add(c.targetDate);
-  }
-
-  const rows = await db
-    .select()
-    .from(timeEntries)
-    .where(and(eq(timeEntries.userId, comps[0].userId), inArray(timeEntries.date, [...dates])));
-
-  const byDate = new Map<string, ReturnType<typeof computeDay>>();
-  for (const date of dates) {
-    const dayEntries = rows
-      .filter((r) => r.date === date)
-      .map((r) => ({ ...r, type: r.type as "entrada" | "saida" }));
-    byDate.set(date, computeDay(dayEntries, settings));
-  }
+): CompWithDays[] {
+  const dayFor = (date: string) => {
+    const list = entries.filter((entry) => entry.date === date);
+    return list.length > 0 ? computeDay(list, settings) : null;
+  };
 
   return comps.map((c) => {
-    const src = byDate.get(c.sourceDate);
-    const tgt = byDate.get(c.targetDate);
+    const sourceDay = dayFor(c.sourceDate);
+    const targetDay = dayFor(c.targetDate);
+
     return {
       ...c,
-      sourceDay: src && !src.empty
-        ? { workedMinutes: src.workedMinutes, excessMinutes: src.excessMinutes }
+      status: normalizeStatus(c.status),
+      sourceDay: sourceDay
+        ? {
+            workedMinutes: sourceDay.workedMinutes,
+            excessMinutes: sourceDay.excessMinutes,
+          }
         : null,
-      targetDay: tgt && !tgt.empty
-        ? { workedMinutes: tgt.workedMinutes, balanceMinutes: tgt.balanceMinutes }
+      targetDay: targetDay
+        ? {
+            workedMinutes: targetDay.workedMinutes,
+            balanceMinutes: targetDay.balanceMinutes,
+          }
         : null,
-    };
+    } satisfies CompWithDays;
   });
 }
